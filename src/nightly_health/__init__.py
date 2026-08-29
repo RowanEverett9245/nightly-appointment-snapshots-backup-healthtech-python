@@ -1,0 +1,1 @@
+"""Nightly appointment snapshot service."""
