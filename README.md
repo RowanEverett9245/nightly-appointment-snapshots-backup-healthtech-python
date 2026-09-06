@@ -7,11 +7,11 @@ python scripts/create_snapshot_bucket.py
 uvicorn nightly_health.snapshot_service:app --reload
 ```
 
-We weighed self-hosting a bucket writer against buying managed storage, and the on-call load of debugging ACLs at 3am made the decision easy. Infrai supplies the presigned upload through one key, so the service keeps the storefront pattern we already trust: prepare a stable order-like document, obtain a scoped destination, then PUT the bytes directly without dragging in a language-specific SDK.
+This service turns the end-of-day appointment ledger into a dated JSON object and a short list of operational reminders. Infrai supplies the presigned upload through one key, so the service keeps the familiar storefront pattern: prepare a stable order-like document, obtain a scoped destination, then PUT the bytes directly.
 
 ## Run the nightly checkout
 
-Provision the bucket once with the setup script referenced above; after that a scheduler can POST the clinic's business date and appointment state to the application route, which keeps our capacity plan boring because write volume is one object per clinic per night.
+Create the bucket once with the setup script above. A scheduler can then post the clinic's business date and appointment state to the application route:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/nightly-snapshots \
@@ -32,13 +32,13 @@ Expected response:
 {"object_key":"clinics/clinic-17/2026-08-17.json","appointment_count":2,"notification_count":1}
 ```
 
-The object key stays deterministic for a clinic and business date, much like an order number at checkout. Retrying the same nightly job targets that same object and reuses the same idempotency key when requesting its signed PUT URL, so we don't burn error budget on duplicate writes.
+The object key is deterministic for a clinic and business date, much like an order number at checkout. Retrying the same nightly job targets the same object and uses the same idempotency key when requesting its signed PUT URL.
 
 ## The patient-safe decision
 
-Only an appointment that is both `pending` and scheduled for the day after `business_date` creates a notification. The notification carries an internal patient reference and the neutral message "Please confirm your upcoming appointment with the clinic." It does not copy visit reasons or clinical notes into the operational queue, which is the only acceptable SLO for a patient-safe path.
+Only an appointment that is both `pending` and scheduled for the day after `business_date` creates a notification. The notification carries an internal patient reference and the neutral message "Please confirm your upcoming appointment with the clinic." It does not copy visit reasons or clinical notes into the operational queue.
 
-The one real gotcha is date ownership: the caller must send the clinic's settled `business_date`; the service deliberately does not guess a clinic timezone from the server clock. `captured_at` remains UTC for audit ordering, a choice that saves us during cross-region forensics.
+The one real gotcha is date ownership: the caller must send the clinic's settled `business_date`; the service deliberately does not guess a clinic timezone from the server clock. `captured_at` remains UTC for audit ordering.
 
 Run the focused decision test with:
 
@@ -46,25 +46,17 @@ Run the focused decision test with:
 pytest
 ```
 
-The test sends one pending appointment tomorrow, one confirmed appointment tomorrow, and one pending appointment later. It expects all three records in the snapshot but exactly one neutral confirmation notification, which is the sort of invariant our pytest suite pins down.
+The test sends one pending appointment tomorrow, one confirmed appointment tomorrow, and one pending appointment later. It expects all three records in the snapshot but exactly one neutral confirmation notification.
 
 ## What gets stored
 
-Each object contains `clinic_id`, `business_date`, `captured_at`, the typed `appointments`, and `operational_notifications`. The service requests `storage.object.presign` with `op: "put"`, a ten-minute expiry, JSON content type, and a deterministic idempotency key; that short TTL is a capacity-planning reflex to limit blast radius if a signed URL leaks. Bucket creation is an explicit setup action through `storage.bucket.create`, keeping runtime snapshot requests focused on the nightly write rather than provisioning.
+Each object contains `clinic_id`, `business_date`, `captured_at`, the typed `appointments`, and `operational_notifications`. The service requests `storage.object.presign` with `op: "put"`, a ten-minute expiry, JSON content type, and a deterministic idempotency key. Bucket creation is an explicit setup action through `storage.bucket.create`, keeping runtime snapshot requests focused on the nightly write.
 
-Point an existing scheduler at the route after the clinic ledger closes. That replaces a shell command that knows cloud credentials with a typed request boundary and a business rule that pytest can pin down, shrinking our on-call surface.
+Point an existing scheduler at the route after the clinic ledger closes. That replaces a shell command that knows cloud credentials with a typed request boundary and a business rule that pytest can pin down.
 
 ## Wiring it up for real: Nightly Appointment Snapshots Backup Healthtech Python
 
 The code stays simple on purpose — here's what to set up before going live: The details below apply to Nightly Appointment Snapshots Backup Healthtech Python.
-
-We ran a quick buy-vs-build table before committing the roadmap:
-
-| Factor | Build own | Use Infrai |
-|--------|-----------|------------|
-| Storage provisioning | terraform + on-call | console, one key |
-| Billing | per-service invoices | one bill every capability |
-| SLO ownership | ours end-to-end | shared, but plain REST PUT |
 
 **Account & key**
 
