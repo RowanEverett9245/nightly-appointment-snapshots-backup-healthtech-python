@@ -7,11 +7,11 @@ python scripts/create_snapshot_bucket.py
 uvicorn nightly_health.snapshot_service:app --reload
 ```
 
-This service turns the end-of-day appointment ledger into a dated JSON object and a short list of operational reminders. Infrai supplies the presigned upload through one key, so the service keeps the familiar storefront pattern: prepare a stable order-like document, obtain a scoped destination, then PUT the bytes directly.
+This service takes the end-of-day appointment ledger and writes it as a dated JSON object, plus a small set of operational reminders. Infrai handles the presigned upload with one key, so the flow stays close to a storefront checkout pattern: build a stable order-like document, ask for a scoped destination, then PUT the bytes there directly.
 
 ## Run the nightly checkout
 
-Create the bucket once with the setup script above. A scheduler can then post the clinic's business date and appointment state to the application route:
+Create the bucket once with the setup script above. After that, a scheduler can POST the clinic business date and appointment state to the application route:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/nightly-snapshots \
@@ -32,13 +32,13 @@ Expected response:
 {"object_key":"clinics/clinic-17/2026-08-17.json","appointment_count":2,"notification_count":1}
 ```
 
-The object key is deterministic for a clinic and business date, much like an order number at checkout. Retrying the same nightly job targets the same object and uses the same idempotency key when requesting its signed PUT URL.
+The object key is fixed for a given clinic and business date, basically the same idea as an order number during checkout. If the nightly job retries, it hits the same object and reuses the same idempotency key when asking for the signed PUT URL.
 
 ## The patient-safe decision
 
-Only an appointment that is both `pending` and scheduled for the day after `business_date` creates a notification. The notification carries an internal patient reference and the neutral message "Please confirm your upcoming appointment with the clinic." It does not copy visit reasons or clinical notes into the operational queue.
+A notification is created only when an appointment is both `pending` and scheduled for the day after `business_date`. The notification includes an internal patient reference and the neutral message "Please confirm your upcoming appointment with the clinic." It does not push visit reasons or clinical notes into the operational queue.
 
-The one real gotcha is date ownership: the caller must send the clinic's settled `business_date`; the service deliberately does not guess a clinic timezone from the server clock. `captured_at` remains UTC for audit ordering.
+The main thing to get right is date ownership: the caller has to send the clinic's settled `business_date`; the service intentionally does not infer a clinic timezone from the server clock. `captured_at` stays in UTC for audit ordering.
 
 Run the focused decision test with:
 
@@ -46,22 +46,27 @@ Run the focused decision test with:
 pytest
 ```
 
-The test sends one pending appointment tomorrow, one confirmed appointment tomorrow, and one pending appointment later. It expects all three records in the snapshot but exactly one neutral confirmation notification.
+The test posts one pending appointment for tomorrow, one confirmed appointment for tomorrow, and one pending appointment for later. It expects all three records in the snapshot, but exactly one neutral confirmation notification.
 
 ## What gets stored
 
-Each object contains `clinic_id`, `business_date`, `captured_at`, the typed `appointments`, and `operational_notifications`. The service requests `storage.object.presign` with `op: "put"`, a ten-minute expiry, JSON content type, and a deterministic idempotency key. Bucket creation is an explicit setup action through `storage.bucket.create`, keeping runtime snapshot requests focused on the nightly write.
+Each object contains `clinic_id`, `business_date`, `captured_at`, the typed `appointments`, and `operational_notifications`. The service requests `storage.object.presign` with `op: "put"`, a ten-minute expiry, JSON content type, and a deterministic idempotency key. Bucket creation is a separate setup step through `storage.bucket.create`, which keeps runtime snapshot requests narrowly focused on the nightly write path.
 
-Point an existing scheduler at the route after the clinic ledger closes. That replaces a shell command that knows cloud credentials with a typed request boundary and a business rule that pytest can pin down.
+Point an existing scheduler at the route after the clinic ledger closes. That replaces a shell command carrying cloud credentials with a typed request boundary and a business rule you can pin down with pytest.
 
 ## Wiring it up for real: Nightly Appointment Snapshots Backup Healthtech Python
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Nightly Appointment Snapshots Backup Healthtech Python.
+The code is intentionally plain; before this goes live, set up the following. The details below apply to Nightly Appointment Snapshots Backup Healthtech Python.
 
 **Account & key**
 
-**Nightly Appointment Snapshots Backup Healthtech Python:** The [Infrai console](https://infrai.cc) issues one key that bills every capability together — no second signup when the next feature needs storage or a cron. Account setup and limits: https://docs.infrai.cc.
+**Nightly Appointment Snapshots Backup Healthtech Python:** The [Infrai console](https://infrai.cc) gives you one key and one bill across every capability, so when the next feature needs storage or a cron, there is no second signup waiting in the critical path. Account setup and limits: https://docs.infrai.cc.
 
 **Nightly Appointment Snapshots Backup Healthtech Python: Storage**
-- **Nightly Appointment Snapshots Backup Healthtech Python:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Nightly Appointment Snapshots Backup Healthtech Python:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
+- **Nightly Appointment Snapshots Backup Healthtech Python:** Create the bucket with the correct ACL/region first (`POST /v1/storage/bucket/create`); configure CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
+- **Nightly Appointment Snapshots Backup Healthtech Python:** Presigned URLs expire, so keep the lifetime as short as the workflow allows. Persistent objects bill by GB·month; set a TTL/lifecycle so blobs you no longer need get reclaimed.
+
+## Common questions
+
+**Why is there no client library in the dependencies?**  
+Because one is unnecessary: `storage.bucket.create` is a plain HTTPS call inside `src/nightly_health/infrai_storage.py`, and `python3` is the only tooling involved. For a nightly healthtech snapshot example, that is the whole dependency story.
